@@ -1,13 +1,12 @@
-import axios from 'axios';
+import axios from "axios";
 
 const geminiResponse = async (userMessage, assistantName, authorName) => {
   try {
-    const groqApiUrl = 'https://api.groq.com/openai/v1/chat/completions';
-    const groqApiKey = process.env.GROQ_API_KEY;
-    const groqModel = 'llama-3.1-8b-instant';
+    const geminiApiKey = process.env.GEMINI_API_KEY;
+    const modelName = process.env.GEMINI_MODEL || "gemini-flash-lite-latest";
 
-    if (!groqApiKey) {
-      throw new Error('GROQ_API_KEY is not configured');
+    if (!geminiApiKey) {
+      throw new Error("GEMINI_API_KEY is not configured");
     }
 
     const fullPrompt = `
@@ -38,6 +37,7 @@ INTENT CATEGORIES AND RULES:
 
 **Search & Media**
 - "google_search": Search on Google.
+- "research_article_search": Search for academic articles, research papers, journals, or scholarly studies.
 - "youtube_search": Search on YouTube.
 - "youtube_play": Play a video or song.
 - "spotify_play": Play music on Spotify.
@@ -63,7 +63,7 @@ INTENT CATEGORIES AND RULES:
 - "telegram_open": Open Telegram.
 - "snapchat_open": Open Snapchat.
 - "linkedin_open": Open LinkedIn.
-- "Youtube_open" : Open Youtube.
+- "Youtube_open": Open YouTube.
 
 **Weather & Location**
 - "weather_show": Show weather for a location.
@@ -117,35 +117,44 @@ USER MESSAGE:
 "${userMessage}"
 `;
 
-    const result = await axios.post(groqApiUrl, {
-      model: groqModel,
-      messages: [
-        {
-          role: 'system',
-          content: 'You are a strict JSON-only assistant that returns one valid JSON object and nothing else.'
-        },
-        {
-          role: 'user',
-          content: fullPrompt
-        }
-      ],
-      temperature: 0.2,
-    }, {
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${groqApiKey}`
-      }
-    });
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiApiKey}`;
 
-    const content = result.data?.choices?.[0]?.message?.content;
+    const result = await axios.post(
+      apiUrl,
+      {
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: fullPrompt }],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 512,
+        },
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    const content = result.data?.candidates?.[0]?.content?.parts
+      ?.map((part) => part.text || "")
+      .join("")
+      .trim();
 
     if (!content) {
-      throw new Error('Groq response did not include message content');
+      throw new Error("Gemini response did not include text content");
     }
 
     return { text: content };
   } catch (error) {
-    console.error('Error fetching Groq response:', error?.response?.data || error.message || error);
+    console.error(
+      "Error fetching Gemini response:",
+      error?.response?.data || error.message || error,
+    );
     throw error;
   }
 };

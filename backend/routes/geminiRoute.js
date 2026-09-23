@@ -1,10 +1,11 @@
-import express from 'express';
-import { askToAssistant } from '../controllers/auth.controller.js';
-import { authMiddleware } from '../middleware/auth.middleware.js';
+import express from "express";
+import { askToAssistant, streamAssistantResponse } from "../controllers/auth.controller.js";
 
 const aiRoute = express.Router();
 
-// AI Assistant route - requires authentication
-aiRoute.post('/getRespone', authMiddleware, askToAssistant);
+// AI Assistant route for the main accessible experience
+aiRoute.post("/getRespone", askToAssistant);
+aiRoute.post("/response", askToAssistant);
+aiRoute.post("/stream", streamAssistantResponse);
 
 export default aiRoute;

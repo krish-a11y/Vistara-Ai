@@ -1,433 +1,453 @@
-import React, { useContext, useEffect, useRef, useState } from 'react';
-import { UserContext } from './../Context/usercontext';
-import { authStore } from '../stores/auth.store';
-import { useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
-import userSpeack from "../assets/user.gif";
+import React, { useEffect, useRef, useState } from "react";
+import {
+  ExternalLink,
+  Mic,
+  MicOff,
+  RotateCcw,
+  Square,
+  Volume2,
+} from "lucide-react";
+
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.MODE === "development" ? "http://localhost:8080/api" : "/api");
 
 const Home = () => {
-    const { users, setUsers, getGeminiResponse } = useContext(UserContext);
-    const [textInput, setTextInput] = useState("");
+  const [status, setStatus] = useState("Press Speak and say a command");
+  const [spokenText, setSpokenText] = useState("");
+  const [assistantText, setAssistantText] = useState(
+    "Say things like open YouTube, search music on YouTube, or what time is it.",
+  );
+  const [isListening, setIsListening] = useState(false);
+  const [wakeMode, setWakeMode] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [actionUrl, setActionUrl] = useState("");
+  const [voiceSupported, setVoiceSupported] = useState(true);
 
-    const { getCurrentUser, logout } = authStore();
-    const navigate = useNavigate();
+  const recognitionRef = useRef(null);
+  const abortRef = useRef(null);
+  const finalTranscriptRef = useRef("");
+  const silenceTimerRef = useRef(null);
+  const lastAssistantTextRef = useRef(assistantText);
+  const wakeModeRef = useRef(false);
+  const isProcessingRef = useRef(false);
+  const awaitingCommandRef = useRef(false);
+  const shouldRestartWakeRef = useRef(false);
+  const speechRunRef = useRef(0);
 
-    // Refs
-    const recognitionRef = useRef(null);
-    const silenceTimerRef = useRef(null);
-    const transcriptRef = useRef('');
-    const isProcessingRef = useRef(false);
-    const getGeminiResponseRef = useRef(getGeminiResponse);
+  useEffect(() => {
+    lastAssistantTextRef.current = assistantText;
+  }, [assistantText]);
 
-    // State
-    const [isListening, setIsListening] = useState(false);
-    const [command, setCommand] = useState('');
-    const [assistantResponse, setAssistantResponse] = useState('');
-    const [isSpeaking, setIsSpeaking] = useState(false);
-    const [showResponse, setShowResponse] = useState(false);
-    const [userSpeaking, setUserSpeaking] = useState(false);
+  useEffect(() => {
+    wakeModeRef.current = wakeMode;
+  }, [wakeMode]);
 
-    // Device detection for mobile-specific handling
-    const isMobileDeviceRef = useRef(/Mobi|Android|iP(ad|hone|od)/i.test(navigator.userAgent));
+  useEffect(() => {
+    isProcessingRef.current = isProcessing;
+  }, [isProcessing]);
 
-    // Clean up repeated phrases that some mobile browsers emit (e.g., "let's let's open ...")
-    const cleanTranscript = (text) => {
-        const normalized = (text || '').replace(/\s+/g, ' ').trim();
-        if (!isMobileDeviceRef.current) return normalized;
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setVoiceSupported(false);
+      setStatus("Speech recognition is not supported in this browser");
+      return;
+    }
 
-        const words = normalized.split(' ');
-        const result = [];
-        let i = 0;
-        const maxGram = 3; // collapse up to trigram repeats
-        while (i < words.length) {
-            result.push(words[i]);
-            let skipped = false;
-            for (let n = Math.min(maxGram, result.length); n >= 1; n--) {
-                const prev = result.slice(-n).join(' ').toLowerCase();
-                const next = words.slice(i + 1, i + 1 + n).join(' ').toLowerCase();
-                if (prev && prev === next) {
-                    i += n; // skip duplicated n-gram once
-                    skipped = true;
-                    break;
-                }
-            }
-            i += 1;
-        }
-        // Also collapse consecutive duplicate single words (handles let's/let’s)
-        const collapsed = result.join(' ').replace(/\b([\w’']+)(\s+\1\b)+/gi, '$1');
-        return collapsed;
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onstart = () => {
+      setIsListening(true);
+      setStatus(wakeModeRef.current ? "Wake mode active. Say hey buddy." : "Listening now");
+      if (!wakeModeRef.current) speak("Listening.");
     };
 
-    useEffect(() => {
-        getGeminiResponseRef.current = getGeminiResponse;
-    }, [getGeminiResponse]);
+    recognition.onresult = (event) => {
+      const results = Array.from(event.results);
+      const transcript = results
+        .map((result) => result[0].transcript)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
 
-    // Fetch user
-    useEffect(() => {
-        const fetchUser = async () => {
-            const response = await getCurrentUser();
-            if (response?.user) setUsers(response.user);
-        };
-        fetchUser();
-    }, []);
+      const finalTranscript = results
+        .filter((result) => result.isFinal)
+        .map((result) => result[0].transcript)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+      const hasFinal = Boolean(finalTranscript);
+      const lowerTranscript = transcript.toLowerCase();
+      const wakeMatch = lowerTranscript.match(/\b(hey|hi|hello)\s+buddy\b/);
 
-    const initRecognition = () => {
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) {
-            console.error("SpeechRecognition not supported in this browser.");
-            return;
+      setSpokenText(transcript);
+
+      if (!hasFinal) {
+        setStatus(wakeModeRef.current ? "Listening for hey buddy." : "Listening...");
+        return;
+      }
+
+      if (wakeModeRef.current && !wakeMatch && !awaitingCommandRef.current) {
+        setStatus("Wake mode active. Say hey buddy.");
+        return;
+      }
+
+      let command = finalTranscript;
+      if (wakeModeRef.current && wakeMatch) {
+        const lowerFinalTranscript = finalTranscript.toLowerCase();
+        const finalWakeMatch = lowerFinalTranscript.match(/\b(hey|hi|hello)\s+buddy\b/);
+        command = finalWakeMatch
+          ? finalTranscript.slice(finalWakeMatch.index + finalWakeMatch[0].length).trim()
+          : "";
+        awaitingCommandRef.current = !command;
+        setStatus(command ? "Command heard: " + command : "Buddy is awake. Say your command.");
+        if (!command) {
+          speak("Yes, tell me the command.", () => restartWakeListening(300));
+          return;
         }
+      } else if (awaitingCommandRef.current) {
+        command = finalTranscript;
+        awaitingCommandRef.current = false;
+        setStatus("Command heard: " + command);
+      } else {
+        setStatus("Heard: " + finalTranscript);
+      }
 
-        if (!recognitionRef.current) {
-            recognitionRef.current = new SpeechRecognition();
-         recognitionRef.current.continuous = false; // Desktop fix
-recognitionRef.current.interimResults = false;
-;
-            recognitionRef.current.lang = 'en-US';
+      if (!isCompleteCommand(command)) {
+        const prompt = "Please say the full command after hey buddy.";
+        setAssistantText(prompt);
+        setStatus("Command was incomplete");
+        speak(prompt, () => restartWakeListening(500));
+        return;
+      }
 
-            recognitionRef.current.onstart = () => {
-                setIsListening(true);
-            };
-
-            recognitionRef.current.onend = () => {
-                if (!isProcessingRef.current) {
-                    setIsListening(false);
-                    setUserSpeaking(false);
-                }
-            };
-
-            recognitionRef.current.onresult = (e) => {
-                if (isProcessingRef.current) return;
-
-                clearTimeout(silenceTimerRef.current);
-
-                const newTranscript = Array.from(e.results)
-                    .map(result => result[0].transcript)
-                    .join('');
-
-                transcriptRef.current = newTranscript;
-                setCommand(transcriptRef.current);
-                setUserSpeaking(true);
-
-                silenceTimerRef.current = setTimeout(() => {
-                    setUserSpeaking(false);
-                    const finalTranscript = transcriptRef.current.trim();
-                    if (!finalTranscript) return;
-                    const processedTranscript = isMobileDeviceRef.current ? cleanTranscript(finalTranscript) : finalTranscript;
-
-                    transcriptRef.current = '';
-                    setCommand(processedTranscript);
-                    isProcessingRef.current = true;
-                    stopListening();
-
-                 handleUserCommand(processedTranscript);
-
-                }, 1000);
-            };
-        }
+      if (command) {
+        finalTranscriptRef.current = command;
+        window.clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = window.setTimeout(() => {
+          shouldRestartWakeRef.current = false;
+          isProcessingRef.current = true;
+          recognition.stop();
+          sendVoiceCommand(finalTranscriptRef.current);
+        }, 250);
+      }
     };
+
+    recognition.onerror = () => {
+      setIsListening(false);
+      setStatus("Microphone error. Please allow microphone access.");
+      speak("Microphone error. Please allow microphone access.");
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      if (wakeModeRef.current && !isProcessingRef.current && shouldRestartWakeRef.current) {
+        restartWakeListening(400);
+        return;
+      }
+
+      if (!isProcessingRef.current && !finalTranscriptRef.current) {
+        setStatus("No speech heard. Press Speak and try again.");
+      }
+    };
+
+    recognitionRef.current = recognition;
+
+    return () => {
+      window.clearTimeout(silenceTimerRef.current);
+      recognition.stop();
+      window.speechSynthesis?.cancel();
+    };
+  }, []);
+
+  const restartWakeListening = (delay = 600) => {
+    if (!wakeModeRef.current || isProcessingRef.current) return;
+    shouldRestartWakeRef.current = true;
+    window.setTimeout(() => {
+      if (!wakeModeRef.current || isProcessingRef.current) return;
+      try {
+        recognitionRef.current?.start();
+        setStatus("Wake mode active. Say hey buddy.");
+      } catch {
+        setStatus("Wake mode active. Say hey buddy.");
+      }
+    }, delay);
+  };
+
+  const isCompleteCommand = (command) => {
+    const normalized = command.toLowerCase().trim();
+    if (!normalized) return false;
+    const incompletePhrases = new Set(["what", "what is", "who", "who is", "open", "search", "play"]);
+    return !incompletePhrases.has(normalized);
+  };
+
+  const speak = (text, onEnd) => {
+    if (!text || !window.speechSynthesis) return;
+    speechRunRef.current += 1;
+    const speechRun = speechRunRef.current;
+    window.speechSynthesis.cancel();
+    const lines = text
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    let currentLine = 0;
+
+    const speakNextLine = () => {
+      if (speechRun !== speechRunRef.current) return;
+      if (currentLine >= lines.length) {
+        onEnd?.();
+        return;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(lines[currentLine]);
+      utterance.rate = 0.95;
+      utterance.pitch = 1;
+      utterance.onend = () => {
+        currentLine += 1;
+        window.setTimeout(speakNextLine, 250);
+      };
+      utterance.onerror = () => onEnd?.();
+      window.speechSynthesis.speak(utterance);
+    };
+
+    speakNextLine();
+  };
+
+  const openAction = (url) => {
+    if (!url) return;
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  const readStream = async (response) => {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop() || "";
+
+      for (const chunk of chunks) {
+        const eventName = chunk.match(/^event:\s*(.+)$/m)?.[1];
+        const dataText = chunk.match(/^data:\s*(.+)$/m)?.[1];
+        if (!eventName || !dataText) continue;
+
+        const data = JSON.parse(dataText);
+        if (eventName === "status") {
+          setStatus(data.message);
+        }
+
+        if (eventName === "final") {
+          const responseText = data.response || "I could not understand that.";
+          const speechText = data.spokenText || responseText;
+          setAssistantText(responseText);
+          setStatus("Task complete");
+          setActionUrl(data.actionUrl || "");
+          speak(speechText, () => restartWakeListening(700));
+          if (data.actionUrl) {
+            window.setTimeout(() => openAction(data.actionUrl), 500);
+          }
+        }
+      }
+    }
+  };
+
+  const sendVoiceCommand = async (command) => {
+    const message = command.trim();
+    if (!message || isProcessing) return;
+
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    isProcessingRef.current = true;
+    setIsProcessing(true);
+    setActionUrl("");
+    setStatus("Doing the task");
+    setAssistantText("Working on it.");
+    shouldRestartWakeRef.current = false;
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/VA/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ message }),
+        signal: abortRef.current.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error("Assistant request failed");
+      }
+
+      await readStream(response);
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      const fallback = "I could not complete that task. Please try again.";
+      setAssistantText(fallback);
+      setStatus("Task failed");
+      speak(fallback, () => restartWakeListening(700));
+    } finally {
+      setIsProcessing(false);
+      isProcessingRef.current = false;
+      abortRef.current = null;
+    }
+  };
 
   const startListening = () => {
-    initRecognition();
-    if (!recognitionRef.current) return;
-
+    if (!voiceSupported || isProcessing) return;
     try {
-        recognitionRef.current.stop(); // prevent double start bug
-        recognitionRef.current.start();
-        setShowResponse(false);
-    } catch (err) {
-        console.error("Mic start error:", err);
+      window.speechSynthesis?.cancel();
+      finalTranscriptRef.current = "";
+      awaitingCommandRef.current = false;
+      shouldRestartWakeRef.current = true;
+      setSpokenText("");
+      recognitionRef.current?.start();
+    } catch {
+      setStatus("Already listening");
     }
-};
+  };
 
+  const startWakeMode = () => {
+    if (!voiceSupported) return;
+    setWakeMode(true);
+    wakeModeRef.current = true;
+    shouldRestartWakeRef.current = true;
+    setStatus("Wake mode active. Say hey buddy, then your command.");
+    speak("Wake mode active. Say hey buddy, then your command.");
+    window.setTimeout(startListening, 250);
+  };
 
-    const stopListening = () => {
-        try {
-            recognitionRef.current?.stop();
-        } catch (err) {
-            console.error("Failed to stop recognition:", err);
-        }
-        setIsListening(false);
-        setUserSpeaking(false);
-    };
+  const stopEverything = () => {
+    window.clearTimeout(silenceTimerRef.current);
+    speechRunRef.current += 1;
+    recognitionRef.current?.stop();
+    abortRef.current?.abort();
+    window.speechSynthesis?.cancel();
+    setIsListening(false);
+    setWakeMode(false);
+    wakeModeRef.current = false;
+    awaitingCommandRef.current = false;
+    shouldRestartWakeRef.current = false;
+    setIsProcessing(false);
+    setStatus("Stopped");
+  };
 
-    const toggleListening = () => {
-
-        if (textInput.trim()) return;
-
-
-        if (isListening) {
-            stopListening();
-        } else {
-            startListening();
-        }
-    };
-
-    const speak = (text) => {
-        setIsSpeaking(true);
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.onend = () => {
-            setIsSpeaking(false);
-           
-        };
-        utterance.onerror = () => setIsSpeaking(false);
-        window.speechSynthesis.cancel();
-        window.speechSynthesis.speak(utterance);
-    };
-
-    const handleLogout = () => {
-        logout();
-        localStorage.clear();
-                window.location.href = "/login";
-    };
-
-    const handleUserCommand = async (text) => {
-    if (!text || isProcessingRef.current) return;
-
-    isProcessingRef.current = true;
-    setCommand(text);
-    setUserSpeaking(false);
-
-    try {
-        const response = await getGeminiResponseRef.current(text);
-
-        if (response) {
-            setAssistantResponse(response.response);
-            setShowResponse(true);
-            speak(response.response);
-
-            if (response.actionUrl) {
-                setTimeout(() => {
-                    window.open(response.actionUrl, "_blank");
-                }, 1000);
-            }
-        }
-    } catch (err) {
-        console.error("Gemini error:", err);
-    } finally {
-        isProcessingRef.current = false;
-    }
-};
-
-    return (
-        <div className="w-full min-h-screen bg-gradient-to-t from-black to-[#030353] flex flex-col justify-center items-center p-6 relative overflow-hidden">
-
-            {/* 3D Bubble Background */}
-            <div className="absolute inset-0 z-0 overflow-hidden">
-                {[...Array(25)].map((_, i) => {
-                    const size = 20 + Math.random() * 60;
-                    const depth = Math.random(); // 0 (far) → 1 (close)
-                    return (
-                        <div
-                            key={i}
-                            className="bubble"
-                            style={{
-                                left: `${Math.random() * 100}%`,
-                                animationDuration: `${6 + Math.random() * 12}s`,
-                                animationDelay: `${Math.random() * 5}s`,
-                                width: `${size}px`,
-                                height: `${size}px`,
-                                zIndex: Math.floor(depth * 10),
-                                filter: `blur(${(1 - depth) * 4}px)`,
-                                opacity: 0.5 + depth * 0.5,
-                                transform: `scale(${0.5 + depth * 1.2})`
-                            }}
-                        />
-                    );
-                })}
-            </div>
-
-            <h1 className='text-white text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-bold mb-6 z-10'>
-                Welcome to Your Virtual Assistant
-            </h1>
-
-            {/* Customize Button */}
-            <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                className="fixed top-4 right-4 p-3 rounded-full pl-6 pr-6 
-                bg-gradient-to-r from-cyan-400 to-blue-500
-                text-black font-bold text-lg shadow-lg z-10"
-                onClick={() => navigate('/customize')}
-            >
-                Customize Your Assistant
-            </motion.button>
-
-            {/* Logout Button */}
-            <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                className="fixed top-20 right-4 p-3 rounded-full pl-6 pr-6
-                bg-gradient-to-r from-cyan-400 to-blue-500
-                text-black font-bold text-lg shadow-lg z-10"
-                onClick={handleLogout}
-            >
-                Logout
-            </motion.button>
-
-            {/* History Button */}
-            <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                className="fixed top-36 right-4 p-3 rounded-full pl-6 pr-6
-                bg-gradient-to-r from-cyan-400 to-blue-500
-                text-black font-bold text-lg shadow-lg z-10"
-                onClick={() => navigate('/history')}
-            >
-                History
-            </motion.button>
-
-            {/* Assistant Avatar */}
-            <div className="relative z-10 flex flex-col items-center">
-                <motion.div
-                    onClick={toggleListening}
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    className={`relative rounded-full overflow-hidden cursor-pointer 
-                        w-[150px] h-[150px] sm:w-[180px] sm:h-[180px] md:w-[220px] md:h-[220px] lg:w-[250px] lg:h-[250px]
-                        border-4 transition-all`}
-                    style={{
-                        borderColor: isSpeaking
-                            ? '#FFD700'
-                            : isListening
-                                ? '#00FFFF'
-                                : '#555'
-                    }}
-                >
-                    {/* Assistant Image */}
-                    <img
-                        src={users?.assistantImage}
-                        alt="Assistant"
-                        className="w-full h-full object-cover rounded-full"
-                    />
-
-                    {/* Speaking glowing ring overlay */}
-                    {isSpeaking && (
-                        <div className="absolute inset-0 flex items-center justify-center">
-                            <img
-                                src={userSpeack}
-                                alt="Speaking Animation"
-                                className="w-full h-full object-cover rounded-full mix-blend-screen"
-                            />
-                        </div>
-                    )}
-
-                    {/* User speaking wave bars */}
-                    {userSpeaking && (
-                        <div className="absolute inset-0 flex items-center justify-center gap-1">
-                            {[...Array(5)].map((_, i) => (
-                                <motion.div
-                                    key={i}
-                                    className="bg-cyan-400 rounded-full"
-                                    style={{ width: 4, height: 20 }}
-                                    animate={{ height: [20, 40, 20] }}
-                                    transition={{
-                                        duration: 0.5,
-                                        repeat: Infinity,
-                                        delay: i * 0.1,
-                                    }}
-                                />
-                            ))}
-                        </div>
-                    )}
-
-                    {/* Mic Icon */}
-                    <div className="absolute bottom-2 right-2 bg-black bg-opacity-50 rounded-full p-2">
-                        <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            width="20"
-                            height="20"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke={isListening ? "#00FFFF" : "#FFFFFF"}
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        >
-                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
-                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                            <line x1="12" y1="19" x2="12" y2="23"></line>
-                            <line x1="8" y1="23" x2="16" y2="23"></line>
-                        </svg>
-                    </div>
-                </motion.div>
-                    {/* Text Input */}
-<div className="mt-8 z-10 w-full max-w-md flex gap-2">
-    <textarea
-        type="textarea"
-        value={textInput}
-        onChange={(e) => setTextInput(e.target.value)}
-        onKeyDown={(e) => {
-            if (e.key === "Enter") {
-                handleUserCommand(textInput.trim());
-                setTextInput("");
-            }
-        }}
-        placeholder="Type your command..."
-        className="flex-1 px-4 py-3 rounded-lg bg-black bg-opacity-50
-                   text-white outline-none border border-cyan-400
-                   focus:ring-2 focus:ring-cyan-300"
-    />
-
-    <button
-        onClick={() => {
-            handleUserCommand(textInput.trim());
-            setTextInput("");
-        }}
-        className="px-5 py-3 rounded-lg font-bold
-                   bg-gradient-to-r from-cyan-400 to-blue-500
-                   text-black"
-    >
-        Send
-    </button>
-</div>
-
-                {/* Assistant Name */}
-                <h1 className='text-white text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-bold mt-6'>
-                    Hi, I'm {users?.assistantName || 'your assistant'}
-                </h1>
-
-                {/* Command display */}
-                <AnimatePresence>
-                    {command && (
-                        <motion.p
-                            initial={{ opacity: 0, y: 20 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: -20 }}
-                            className="text-cyan-300 text-lg mt-2 italic"
-                        >
-                            "{command}"
-                        </motion.p>
-                    )}
-                </AnimatePresence>
-
-                {/* Assistant Response */}
-                <AnimatePresence>
-                    {showResponse && (
-                        <motion.div
-                            initial={{ opacity: 0, y: 20 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: -20 }}
-                            className="mt-4 p-4 bg-blue-900 bg-opacity-50 rounded-lg max-w-md"
-                        >
-                            <div className="flex items-start">
-                                <div className="flex-shrink-0 mr-3 relative">
-                                    <img
-                                        src={users?.assistantImage}
-                                        alt="Assistant"
-                                        className="w-10 h-10 rounded-full object-cover"
-                                    />
-                                </div>
-                                <div className="text-white">
-                                    <p>{assistantResponse}</p>
-                                </div>
-                            </div>
-                        </motion.div>
-                    )}
-                </AnimatePresence>
-            </div>
+  return (
+    <main className="min-h-screen bg-black text-white">
+      <section className="mx-auto flex min-h-screen w-full max-w-4xl flex-col justify-between gap-8 px-5 py-8">
+        <div className="space-y-4">
+          <p className="text-base font-black uppercase tracking-[0.18em] text-[#facc15]">
+            Voice assistant for visually impaired users
+          </p>
+          <h1 className="text-4xl font-black leading-tight sm:text-6xl">
+            Say “hey buddy” and the assistant does the task.
+          </h1>
         </div>
-    );
+
+        <div
+          aria-live="assertive"
+          aria-atomic="true"
+          role="status"
+          className="rounded-md border-4 border-[#facc15] bg-[#171103] p-5"
+        >
+          <p className="text-sm font-black uppercase tracking-[0.18em] text-[#facc15]">Status</p>
+          <p className="mt-2 text-3xl font-black leading-tight">{status}</p>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <button
+            type="button"
+            onClick={startListening}
+            disabled={!voiceSupported || isListening || isProcessing}
+            className="flex min-h-40 flex-col items-center justify-center gap-4 rounded-md bg-[#facc15] p-6 text-black outline-offset-4 transition hover:bg-[#fde047] focus:outline focus:outline-4 focus:outline-white disabled:cursor-not-allowed disabled:bg-white/20 disabled:text-white/50"
+          >
+            {isListening ? <MicOff size={56} aria-hidden="true" /> : <Mic size={56} aria-hidden="true" />}
+            <span className="text-4xl font-black">{isListening ? "Listening" : "Speak"}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={stopEverything}
+            className="flex min-h-40 flex-col items-center justify-center gap-4 rounded-md bg-[#ef4444] p-6 text-white outline-offset-4 transition hover:bg-[#f87171] focus:outline focus:outline-4 focus:outline-white"
+          >
+            <Square size={56} aria-hidden="true" />
+            <span className="text-4xl font-black">Stop</span>
+          </button>
+        </div>
+
+        <button
+          type="button"
+          onClick={startWakeMode}
+          disabled={!voiceSupported || wakeMode}
+          className="min-h-20 rounded-md border-4 border-[#22c55e] bg-[#03180b] px-6 py-4 text-3xl font-black text-[#86efac] outline-offset-4 hover:bg-[#064e3b] focus:outline focus:outline-4 focus:outline-white disabled:cursor-not-allowed disabled:border-white/30 disabled:text-white/50"
+        >
+          {wakeMode ? "Wake mode is on. Say hey buddy." : "Start wake mode"}
+        </button>
+
+        <div className="grid gap-4">
+          <article className="rounded-md border-2 border-[#38bdf8] bg-[#03111b] p-5">
+            <p className="text-sm font-black uppercase tracking-[0.18em] text-[#7dd3fc]">You said</p>
+            <p className="mt-2 min-h-12 text-2xl font-bold leading-9">
+              {spokenText || (wakeMode ? "Say hey buddy..." : "Waiting for speech...")}
+            </p>
+          </article>
+
+          <article className="rounded-md border-2 border-[#22c55e] bg-[#03180b] p-5">
+            <p className="text-sm font-black uppercase tracking-[0.18em] text-[#86efac]">Nova</p>
+            <p className="mt-2 text-3xl font-black leading-10">{assistantText}</p>
+          </article>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <button
+            type="button"
+            onClick={() => speak(lastAssistantTextRef.current)}
+            className="flex min-h-16 items-center justify-center gap-3 rounded-md border-2 border-white px-5 py-4 text-xl font-black outline-offset-4 hover:bg-white hover:text-black focus:outline focus:outline-4 focus:outline-white"
+          >
+            <Volume2 aria-hidden="true" />
+            Repeat response
+          </button>
+
+          {actionUrl ? (
+            <button
+              type="button"
+              onClick={() => openAction(actionUrl)}
+              className="flex min-h-16 items-center justify-center gap-3 rounded-md border-2 border-[#7dd3fc] px-5 py-4 text-xl font-black text-[#7dd3fc] outline-offset-4 hover:bg-[#082f49] focus:outline focus:outline-4 focus:outline-white"
+            >
+              <ExternalLink aria-hidden="true" />
+              Open task again
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setSpokenText("");
+                setAssistantText("Say things like open YouTube, search music on YouTube, or what time is it.");
+                setStatus("Press Speak and say a command");
+              }}
+              className="flex min-h-16 items-center justify-center gap-3 rounded-md border-2 border-[#7dd3fc] px-5 py-4 text-xl font-black text-[#7dd3fc] outline-offset-4 hover:bg-[#082f49] focus:outline focus:outline-4 focus:outline-white"
+            >
+              <RotateCcw aria-hidden="true" />
+              Reset
+            </button>
+          )}
+        </div>
+
+        {!voiceSupported && (
+          <p className="rounded-md border-2 border-[#ef4444] bg-[#230606] p-4 text-xl font-bold">
+            Your browser does not support speech recognition. Please use Chrome or Edge.
+          </p>
+        )}
+      </section>
+    </main>
+  );
 };
 
 export default Home;

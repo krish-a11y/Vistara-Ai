@@ -20,14 +20,23 @@ const allowedOrigins = [
   process.env.RENDER_EXTERNAL_URL,
   'http://localhost:5173',
   'https://localhost:5173',
+  'http://127.0.0.1:5173',
+  'https://127.0.0.1:5173',
   'http://localhost:8080',
-  'https://localhost:8080'
+  'https://localhost:8080',
+  'http://127.0.0.1:8080',
+  'https://127.0.0.1:8080'
 ].filter(Boolean);
+
+const isDevLoopbackOrigin = (origin) => {
+  if (process.env.NODE_ENV === 'production') return false;
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+};
 
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true); // allow non-browser tools/health checks
-    const isAllowed = allowedOrigins.some(o => origin === o);
+    const isAllowed = allowedOrigins.some(o => origin === o) || isDevLoopbackOrigin(origin);
     return isAllowed ? callback(null, true) : callback(new Error('Not allowed by CORS'));
   },
   credentials: true

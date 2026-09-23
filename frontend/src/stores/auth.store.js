@@ -2,7 +2,7 @@ import { axiosInstance } from "../utils/axiosInstance.js";
 import { create } from "zustand";
 import { toast } from "react-hot-toast";
 
-export const authStore = create((set, get) => ({
+export const authStore = create((set) => ({
   user: null,
   isAuthenticated: false,
   loading: false,
@@ -134,7 +134,9 @@ export const authStore = create((set, get) => ({
         return null;
       }
     } catch (error) {
-      console.error("Error fetching current user:", error);
+      if (error.response?.status !== 401) {
+        console.error("Error fetching current user:", error);
+      }
       set({ user: null, isAuthenticated: false });
       return null;
     }
